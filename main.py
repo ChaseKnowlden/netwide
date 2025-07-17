@@ -1,3 +1,6 @@
+import socket
+import ssl
+
 class URL:
   def __init__(self, url_string=None):
     self.url_string = url_string
@@ -93,6 +96,153 @@ class URL:
     """Get the parsed path."""
     return self.path
   
+  def download(self):
+    """Download the web page content from the URL using raw sockets."""
+    return self.request("GET")
+  
+  def send(self, data, content_type="application/x-www-form-urlencoded"):
+    """Send data to the server using POST request."""
+    return self.request("POST", data, content_type)
+  
+  def request(self, method="GET", data=None, content_type="application/x-www-form-urlencoded"):
+    """Make an HTTP request to the server using raw sockets."""
+    if not self.url_string:
+      raise ValueError("No URL string provided")
+    
+    # Use parsed components
+    host = self.host
+    path = self.path if self.path else "/"
+    port = 443 if self.scheme == "https" else 80
+    
+    # Handle port in host (e.g., localhost:8080)
+    if ":" in host:
+      host, port_str = host.split(":", 1)
+      port = int(port_str)
+    
+    try:
+      # Create socket connection
+      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      sock.settimeout(10)  # 10 second timeout
+      
+      # Wrap with SSL for HTTPS
+      if self.scheme == "https":
+        context = ssl.create_default_context()
+        sock = context.wrap_socket(sock, server_hostname=host)
+      
+      # Connect to the server
+      sock.connect((host, port))
+      
+      # Construct HTTP request
+      request = f"{method} {path} HTTP/1.1\r\n"
+      request += f"Host: {host}\r\n"
+      request += "User-Agent: Mozilla/5.0 (Python Socket Browser) AppleWebKit/537.36\r\n"
+      request += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
+      request += "Accept-Language: en-US,en;q=0.5\r\n"
+      request += "Accept-Encoding: identity\r\n"  # Don't request compression
+      request += "Connection: close\r\n"
+      
+      # Add data for POST requests
+      if data and method == "POST":
+        if isinstance(data, dict):
+          # Convert dict to URL-encoded form data
+          encoded_data = "&".join([f"{key}={value}" for key, value in data.items()])
+        else:
+          encoded_data = str(data)
+        
+        request += f"Content-Type: {content_type}\r\n"
+        request += f"Content-Length: {len(encoded_data)}\r\n"
+        request += "\r\n"
+        request += encoded_data
+      else:
+        request += "\r\n"
+      
+      # Send request
+      sock.send(request.encode('utf-8'))
+      
+      # Read response
+      response_data = b""
+      while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+          break
+        response_data += chunk
+      
+      sock.close()
+      
+      # Parse HTTP response
+      response_str = response_data.decode('utf-8', errors='ignore')
+      
+      # Split headers and body
+      if "\r\n\r\n" in response_str:
+        headers_part, body = response_str.split("\r\n\r\n", 1)
+      else:
+        headers_part, body = response_str.split("\n\n", 1)
+      
+      # Parse status line
+      header_lines = headers_part.split('\r\n') if '\r\n' in headers_part else headers_part.split('\n')
+      status_line = header_lines[0]
+      
+      # Extract status code
+      status_parts = status_line.split()
+      if len(status_parts) >= 2:
+        status_code = int(status_parts[1])
+      else:
+        status_code = 0
+      
+      # Parse headers
+      headers = {}
+      for line in header_lines[1:]:
+        if ":" in line:
+          key, value = line.split(":", 1)
+          headers[key.strip()] = value.strip()
+      
+      # Handle chunked transfer encoding
+      if headers.get('Transfer-Encoding', '').lower() == 'chunked':
+        body = self._decode_chunked(body)
+      
+      return {
+        'content': body,
+        'status_code': status_code,
+        'headers': headers,
+        'url': f"{self.scheme}://{self.host}{self.path}",
+        'method': method
+      }
+      
+    except socket.timeout:
+      raise Exception("Connection timeout")
+    except socket.gaierror as e:
+      raise Exception(f"DNS resolution failed: {e}")
+    except ConnectionRefusedError:
+      raise Exception("Connection refused")
+    except Exception as e:
+      raise Exception(f"Download failed: {str(e)}")
+  
+  def _decode_chunked(self, body):
+    """Decode chunked transfer encoding."""
+    decoded = ""
+    lines = body.split('\r\n') if '\r\n' in body else body.split('\n')
+    i = 0
+    
+    while i < len(lines):
+      # Get chunk size
+      try:
+        chunk_size = int(lines[i], 16)
+      except (ValueError, IndexError):
+        break
+      
+      if chunk_size == 0:
+        break
+      
+      # Get chunk data
+      i += 1
+      if i < len(lines):
+        chunk_data = lines[i]
+        decoded += chunk_data[:chunk_size]
+      
+      i += 1
+    
+    return decoded
+  
   def __str__(self):
     """String representation of the URL."""
     return f"URL(scheme='{self.scheme}', host='{self.host}', path='{self.path}', url='{self.url_string}')"
@@ -100,28 +250,81 @@ class URL:
 
 # Example usage
 if __name__ == "__main__":
-  # Test HTTP scheme parsing and host/path separation
-  test_urls = [
+  # Test GET requests
+  print("=== Testing GET requests ===")
+  get_test_urls = [
     "http://example.com",
-    "https://secure.example.com",
-    "https://www.google.com/search?q=python",
-    "https://api.github.com/repos/owner/repo",
-    "http://localhost:8080/app/dashboard",
-    "example.com",  # No scheme, should default to http
-    "example.com/path/to/resource",
-    "https://subdomain.example.com/path/to/file.html?param=value#section",
+    "https://httpbin.org/get",
   ]
   
-  for url_str in test_urls:
+  for url_str in get_test_urls:
     try:
       url = URL(url_str)
       print(f"URL: {url_str}")
       print(f"  Scheme: {url.get_scheme()}")
       print(f"  Host: {url.get_host()}")
       print(f"  Path: {url.get_path()}")
-      print(f"  Is Secure: {url.is_secure()}")
-      print(f"  Parsed: {url}")
+      
+      # Download the content
+      print(f"  Downloading...")
+      result = url.download()
+      print(f"  Method: {result['method']}")
+      print(f"  Status: {result['status_code']}")
+      print(f"  Content-Type: {result['headers'].get('Content-Type', 'Unknown')}")
+      print(f"  Content Length: {len(result['content'])} characters")
+      print(f"  First 200 characters: {result['content'][:200]}...")
       print()
-    except ValueError as e:
-      print(f"Error parsing {url_str}: {e}")
+      
+    except Exception as e:
+      print(f"Error with {url_str}: {e}")
       print()
+  
+  # Test POST requests
+  print("=== Testing POST requests ===")
+  post_test_urls = [
+    "https://httpbin.org/post",
+    "https://httpbin.org/anything",
+  ]
+  
+  for url_str in post_test_urls:
+    try:
+      url = URL(url_str)
+      print(f"URL: {url_str}")
+      
+      # Send form data
+      form_data = {
+        "name": "Python Browser",
+        "version": "1.0",
+        "message": "Hello from custom socket client!"
+      }
+      
+      print(f"  Sending POST data: {form_data}")
+      result = url.send(form_data)
+      print(f"  Method: {result['method']}")
+      print(f"  Status: {result['status_code']}")
+      print(f"  Content-Type: {result['headers'].get('Content-Type', 'Unknown')}")
+      print(f"  Content Length: {len(result['content'])} characters")
+      print(f"  First 500 characters: {result['content'][:500]}...")
+      print()
+      
+    except Exception as e:
+      print(f"Error with {url_str}: {e}")
+      print()
+  
+  # Test sending JSON data
+  print("=== Testing JSON POST request ===")
+  try:
+    url = URL("https://httpbin.org/post")
+    json_data = '{"user": "john", "age": 30, "active": true}'
+    
+    print(f"  Sending JSON data: {json_data}")
+    result = url.send(json_data, content_type="application/json")
+    print(f"  Method: {result['method']}")
+    print(f"  Status: {result['status_code']}")
+    print(f"  Content-Type: {result['headers'].get('Content-Type', 'Unknown')}")
+    print(f"  Response: {result['content'][:800]}...")
+    print()
+    
+  except Exception as e:
+    print(f"Error with JSON POST: {e}")
+    print()
