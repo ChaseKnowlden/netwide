@@ -159,28 +159,38 @@ class URL:
       # Send request
       sock.send(request.encode('utf-8'))
       
-      # Read response
-      response_data = b""
+      # Read response using makefile for better handling
+      response_file = sock.makefile('rb')
+      
+      # Read status line
+      status_line = response_file.readline().decode('utf-8', errors='ignore').strip()
+      
+      # Read headers
+      headers = {}
       while True:
-        chunk = sock.recv(4096)
-        if not chunk:
+        header_line = response_file.readline().decode('utf-8', errors='ignore').strip()
+        if not header_line:  # Empty line indicates end of headers
           break
-        response_data += chunk
+        if ':' in header_line:
+          key, value = header_line.split(':', 1)
+          headers[key.strip()] = value.strip()
       
-      sock.close()
-      
-      # Parse HTTP response
-      response_str = response_data.decode('utf-8', errors='ignore')
-      
-      # Split headers and body
-      if "\r\n\r\n" in response_str:
-        headers_part, body = response_str.split("\r\n\r\n", 1)
+      # Read body based on Content-Length or until connection closes
+      body = ""
+      if 'Content-Length' in headers:
+        content_length = int(headers['Content-Length'])
+        body_bytes = response_file.read(content_length)
+        body = body_bytes.decode('utf-8', errors='ignore')
+      elif headers.get('Transfer-Encoding', '').lower() == 'chunked':
+        # Handle chunked encoding
+        body = self._read_chunked_response(response_file)
       else:
-        headers_part, body = response_str.split("\n\n", 1)
+        # Read until connection closes
+        body_bytes = response_file.read()
+        body = body_bytes.decode('utf-8', errors='ignore')
       
-      # Parse status line
-      header_lines = headers_part.split('\r\n') if '\r\n' in headers_part else headers_part.split('\n')
-      status_line = header_lines[0]
+      response_file.close()
+      sock.close()
       
       # Extract status code
       status_parts = status_line.split()
@@ -188,17 +198,6 @@ class URL:
         status_code = int(status_parts[1])
       else:
         status_code = 0
-      
-      # Parse headers
-      headers = {}
-      for line in header_lines[1:]:
-        if ":" in line:
-          key, value = line.split(":", 1)
-          headers[key.strip()] = value.strip()
-      
-      # Handle chunked transfer encoding
-      if headers.get('Transfer-Encoding', '').lower() == 'chunked':
-        body = self._decode_chunked(body)
       
       return {
         'content': body,
@@ -216,6 +215,35 @@ class URL:
       raise Exception("Connection refused")
     except Exception as e:
       raise Exception(f"Download failed: {str(e)}")
+  
+  def _read_chunked_response(self, response_file):
+    """Read chunked transfer encoding using makefile."""
+    body = ""
+    
+    while True:
+      # Read chunk size line
+      size_line = response_file.readline().decode('utf-8', errors='ignore').strip()
+      if not size_line:
+        break
+      
+      # Parse chunk size (hexadecimal)
+      try:
+        chunk_size = int(size_line, 16)
+      except ValueError:
+        break
+      
+      if chunk_size == 0:
+        # End of chunks
+        break
+      
+      # Read chunk data
+      chunk_data = response_file.read(chunk_size)
+      body += chunk_data.decode('utf-8', errors='ignore')
+      
+      # Read the trailing CRLF after chunk data
+      response_file.readline()
+    
+    return body
   
   def _decode_chunked(self, body):
     """Decode chunked transfer encoding."""
